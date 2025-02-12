@@ -1,0 +1,14 @@
+
+services:
+  ollama-api:
+    build: .
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=production
+    volumes:
+      - /var/lib/docker/volumes/ollama-api:/caminho/no/container
+    restart: unless-stopped
+ 
+
+

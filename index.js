@@ -6,7 +6,7 @@ import { GoogleGenAI } from "@google/genai";
 
 const app = express();
 const PORT = 3001;
-const PIPER_HOST = "http://localhost:5000"; // API do Piper
+const PIPER_HOST = "http://host.docker.internal:5000"; // API do Piper
 
 app.use(express.json());
 app.use(cors());
@@ -64,19 +64,27 @@ app.post("/api/chat", async (req, res) => {
 
 // Rota para TTS via Piper
 app.post("/api/chat2", async (req, res) => {
+  console.log("🟢 [POST] /api/chat2 chamada recebida");
   try {
     const { model, messages } = req.body;
+    console.log("📥 Payload recebido:", { model, messages });
+
     if (!model || !Array.isArray(messages)) {
+      console.log("❌ Model ou mensagens ausentes");
       return res.status(400).json({ error: "Model e array de mensagens são obrigatórios" });
     }
 
     // Extrai sistema e histórico
     const systemMsg = messages.find(m => m.role === 'system');
     const historyMsgs = messages.filter(m => m.role === 'user' || m.role === 'model');
+    console.log("🔎 Mensagem do sistema:", systemMsg);
+    console.log("📚 Histórico:", historyMsgs);
+
     const config = {
       systemInstruction: systemMsg ? systemMsg.content : "Você é a IA Data Matemática, ...",
       temperature: 0.1
     };
+    console.log("⚙️ Configuração do chat:", config);
 
     // Cria chat e envia última mensagem
     const chat = ai.chats.create({
@@ -85,20 +93,30 @@ app.post("/api/chat2", async (req, res) => {
       config
     });
     const lastUser = historyMsgs[historyMsgs.length - 1];
+    console.log("👤 Última mensagem do usuário:", lastUser);
+
     const response = await chat.sendMessage({ message: lastUser.text || lastUser.content });
     const text = response.text;
+    console.log("🤖 Resposta do Gemini:", text);
 
     // Envia texto para Piper
+    console.log("📤 Enviando texto para Piper...");
     const piperRes = await axios.post(PIPER_HOST, text, {
       headers: { 'Content-Type': 'text/plain' },
       responseType: 'stream'
     });
+    console.log("🔊 Piper respondeu, transmitindo áudio...");
+
     res.setHeader("Content-Type", "audio/wav");
     pipeline(piperRes.data, res, err => {
-      if (err) console.error("Erro streaming áudio:", err);
+      if (err) {
+        console.error("❗ Erro streaming áudio:", err);
+      } else {
+        console.log("✅ Áudio transmitido com sucesso");
+      }
     });
   } catch (err) {
-    console.error("Erro Piper TTS:", err);
+    console.error("🔥 Erro Piper TTS:", err);
     res.status(500).json({ error: "Erro no TTS" });
   }
 });

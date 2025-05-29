@@ -1,3 +1,4 @@
+version: "3.8"
 
 services:
   ollama-api:
@@ -6,9 +7,14 @@ services:
       - "3001:3001"
     environment:
       - NODE_ENV=production
+      # Aponta para o host do Docker (onde o Piper está escutando na porta 5000)
+      - PIPER_HOST=http://host.docker.internal:5000
+    # Garante que `host.docker.internal` seja mapeado para o gateway do host
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
-      - /var/lib/docker/volumes/ollama-api:/caminho/no/container
+      - ollama-api-data:/caminho/no/container
     restart: unless-stopped
- 
 
-
+volumes:
+  ollama-api-data:

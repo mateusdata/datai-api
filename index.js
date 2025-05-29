@@ -1,96 +1,134 @@
-const express = require("express");
-const axios = require("axios");
-const cors = require("cors");
-const { pipeline } = require("stream");
-const fs = require("fs");
-const path = require("path");
+import express from "express";
+import cors from "cors";
+import axios from "axios";
+import { pipeline } from "stream";
+import { GoogleGenAI } from "@google/genai";
 
 const app = express();
 const PORT = 3001;
-const OLLAMA_HOST = "http://localhost:11434"; // API do Ollama
-const PIPER_HOST = "http://localhost:5000";      // API do Piper
+const PIPER_HOST = "http://localhost:5000"; // API do Piper
 
 app.use(express.json());
 app.use(cors());
 
-// Rota para gerar resposta do Ollama
+// Inicializa cliente Google Gemini
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "AIzaSyAnyPWzIB2YJKK8Anex1aOCXndgmt5QwvQ" });
+
+// Função para criar e enviar mensagens via Gemini Chat SDK
+async function streamGeminiChat(model, messages, res) {
+  // Extrai sistema e histórico de conversas
+  const systemMsg = messages.find(m => m.role === 'system');
+  const historyMsgs = messages.filter(m => m.role === 'user' || m.role === 'model');
+
+  // Monta configuração
+  const config = {
+    systemInstruction: systemMsg ? systemMsg.content : "Você é a IA Data Matemática, sua professora super-humana de matemática.",
+    temperature: 0.1,
+    maxOutputTokens: 1024
+  };
+
+  // Cria chat
+  const chat = ai.chats.create({
+    model,
+    history: historyMsgs.map(m => ({ role: m.role, parts: [{ text: m.content }] })),
+    config
+  });
+
+  // Inicia streaming da última mensagem do usuário
+  const lastUser = historyMsgs[historyMsgs.length - 1];
+  const stream = await chat.sendMessageStream({ message: lastUser.text || lastUser.content });
+
+  for await (const chunk of stream) {
+    res.write(`data: ${JSON.stringify({ message: { content: chunk.text } })}\n\n`);
+  }
+  res.end();
+}
+
+// Rota de chat com streaming
 app.post("/api/chat", async (req, res) => {
   try {
-    const { model, messages, stream = false } = req.body;
-    if (!model || !messages || !Array.isArray(messages)) {
-      return res.status(400).json({ error: "Model e um array de messages são obrigatórios" });
+    const { model, messages } = req.body;
+    if (!model || !Array.isArray(messages)) {
+      return res.status(400).json({ error: "Model e array de mensagens são obrigatórios" });
     }
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
 
-    const data = {
-      options: {
-        temperature: 0.1,
-        top_p: 0.1,
-        num_predict: 9000000000000000,
-        repeat_penalty: 1.5,
-        mirostat: 2,
-        stop: []
-      }
-    };
-
-    const ollamaRequest = { model, messages, stream };
-
-    if (stream) {
-      const response = await axios.post(`${OLLAMA_HOST}/api/chat`, ollamaRequest, {
-        responseType: "stream",
-      });
-      response.data.pipe(res);
-    } else {
-      const response = await axios.post(`${OLLAMA_HOST}/api/chat`, ollamaRequest);
-      res.json(response.data);
-    }
-  } catch (error) {
-    console.error("Erro ao chamar o Ollama:", error.message);
-    res.status(500).json({ error: "Erro ao conectar com o Ollama" });
+    await streamGeminiChat(model, messages, res);
+  } catch (err) {
+    console.error("Erro Gemini Chat:", err);
+    if (!res.headersSent) res.status(500).json({ error: "Erro no Gemini Chat" });
   }
 });
 
-// Rota para converter texto em áudio com Piper e retornar para o frontend
+// Rota para TTS via Piper
 app.post("/api/chat2", async (req, res) => {
-  const { model, messages } = req.body;
-
-  // Validação dos parâmetros
-  if (!model || !messages || !Array.isArray(messages)) {
-    return res.status(400).json({ error: "Model e um array de messages são obrigatórios" });
-  }
-
   try {
-    // 1️⃣ Enviar texto para o Ollama
-    const ollamaResponse = await axios.post(`${OLLAMA_HOST}/api/chat`, { model, messages, stream: false });
-    console.log("Resposta do Ollama:", ollamaResponse.data.message.content);
-    const respostaOllama = ollamaResponse.data.message.content;
+    const { model, messages } = req.body;
+    if (!model || !Array.isArray(messages)) {
+      return res.status(400).json({ error: "Model e array de mensagens são obrigatórios" });
+    }
 
-    // 2️⃣ Enviar o texto obtido para o Piper TTS para gerar o áudio
-    const piperResponse = await axios.post(PIPER_HOST, respostaOllama, {
+    // Extrai sistema e histórico
+    const systemMsg = messages.find(m => m.role === 'system');
+    const historyMsgs = messages.filter(m => m.role === 'user' || m.role === 'model');
+    const config = {
+      systemInstruction: systemMsg ? systemMsg.content : "Você é a IA Data Matemática, ...",
+      temperature: 0.1
+    };
+
+    // Cria chat e envia última mensagem
+    const chat = ai.chats.create({
+      model,
+      history: historyMsgs.map(m => ({ role: m.role, parts: [{ text: m.content }] })),
+      config
+    });
+    const lastUser = historyMsgs[historyMsgs.length - 1];
+    const response = await chat.sendMessage({ message: lastUser.text || lastUser.content });
+    const text = response.text;
+
+    // Envia texto para Piper
+    const piperRes = await axios.post(PIPER_HOST, text, {
       headers: { 'Content-Type': 'text/plain' },
       responseType: 'stream'
     });
-    console.log("Resposta do Piper recebida. Encaminhando áudio para o frontend...");
-
-    // Configurar header para áudio WAV e encaminhar o stream do Piper para o cliente
     res.setHeader("Content-Type", "audio/wav");
-    pipeline(piperResponse.data, res, (err) => {
-      if (err) {
-        console.error("Erro ao enviar áudio:", err.message);
-        return res.status(500).end("Erro ao enviar áudio");
-      }
+    pipeline(piperRes.data, res, err => {
+      if (err) console.error("Erro streaming áudio:", err);
     });
-  } catch (error) {
-    console.error("Erro ao enviar texto para o Ollama ou Piper:", error.message);
-    return res.status(500).json({ error: "Erro ao processar a solicitação" });
+  } catch (err) {
+    console.error("Erro Piper TTS:", err);
+    res.status(500).json({ error: "Erro no TTS" });
   }
 });
 
-// Rota de teste
-app.get("/", (req, res) => {
-  res.json({ status: "ok" });
+// Rota teste
+app.get("/", (req, res) => res.json({ status: "ok" }));
+
+
+app.get("/api/pipi", async (req, res) => {
+  const { text } = req.query;
+
+  if (!text || typeof text !== "string") {
+    return res.status(400).json({ error: "Parâmetro 'text' é obrigatório." });
+  }
+
+  try {
+    const piperRes = await axios.post(PIPER_HOST, text, {
+      headers: { "Content-Type": "text/plain" },
+      responseType: "stream"
+    });
+
+    res.setHeader("Content-Type", "audio/wav");
+    pipeline(piperRes.data, res, err => {
+      if (err) console.error("Erro ao encaminhar stream do Piper:", err);
+    });
+  } catch (err) {
+    console.error("Erro na rota /api/pipi:", err);
+    res.status(500).json({ error: "Erro ao comunicar com o Piper." });
+  }
 });
 
-// Iniciar servidor
-app.listen(PORT, () => {
-  console.log(`API rodando em http://localhost:${PORT}`);
-});
+
+app.listen(PORT, () => console.log(`API rodando em http://localhost:${PORT}`));
